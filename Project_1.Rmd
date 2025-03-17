@@ -1,0 +1,364 @@
+---
+title: "Project_1"
+output:
+  pdf_document: default
+  html_document: default
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Load necessary libraries
+library(readxl)
+library(dplyr)
+library(caret)
+library(fastDummies)
+library(ggplot2)
+library(VIM)
+library(e1071)  # For SVM and Naive Bayes models
+library(GGally)
+library(corrplot)
+
+# Load data from "Normalized_Data" sheet
+file_path <- "Mine_Dataset.xls"
+data <- read_excel(file_path, sheet = "Normalized_Data")
+
+# Step 1: Map values in columns 'M' and 'S'
+
+# Map values in column 'S' to categorical descriptions
+data <- data %>%
+  mutate(
+    S = case_when(
+      S == 0   ~ "dry and sandy",
+      S == 0.2 ~ "dry and humus",
+      S == 0.4 ~ "dry and limy",
+      S == 0.6 ~ "humid and sandy",
+      S == 0.8 ~ "humid and humus",
+      S == 1   ~ "humid and limy",
+      TRUE     ~ "undefined"
+    ),
+    S = factor(S)
+  )
+
+# Map values in column 'M' to target categories
+data <- data %>%
+  mutate(
+    M_category = case_when(
+      M == 1 ~ "Null",
+      M == 2 ~ "Anti-Tank",
+      M == 3 ~ "Anti-personnel",
+      M == 4 ~ "Booby Trapped Anti-personnel",
+      M == 5 ~ "M14 Anti-personnel",
+      TRUE   ~ "undefined"
+    ),
+    M_category = factor(M_category)
+  )
+head(data)
+```
+
+# Step 2: Data Cleaning
+```{r}
+## 1. Remove duplicates
+data <- data %>% distinct()
+
+## 2. Check for missing values
+missing_values <- sapply(data, function(x) sum(is.na(x)))
+print(missing_values)
+
+# Visualize missing data
+aggr(data, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(data), cex.axis=.7, gap=3, ylab=c("Missing data","Pattern"))
+
+## 3. Handle categorical variables (Create dummy variables for 'S' and remove the original 'S' and 'M')
+data <- dummy_cols(data, select_columns = "S", remove_first_dummy = TRUE)
+data <- data %>% select(-S, -M)
+
+## 4. Check data structure
+str(data)
+
+## 5. Scale numeric columns (e.g., V and H) for models that require scaling
+data_scaled <- data %>%
+  mutate(across(c(V, H), scale))
+
+## 6. Visualize outliers using boxplots for numeric features
+ggplot(data, aes(x = "", y = V)) + 
+  geom_boxplot() + 
+  labs(title = "Boxplot of V")
+
+ggplot(data, aes(x = "", y = H)) + 
+  geom_boxplot() + 
+  labs(title = "Boxplot of H")
+
+## Alternatively, calculate Z-scores for outlier detection
+data <- data %>%
+  mutate(
+    V_z = (V - mean(V)) / sd(V),
+    H_z = (H - mean(H)) / sd(H)
+  )
+
+## 7. Create interaction term between V and H (optional feature engineering)
+data$V_H_interaction <- data$V * data$H
+
+
+## 10. Final Check for data structure and summary
+str(data)
+summary(data)
+```
+# Step 3: Exploratory Data Analysis (EDA)
+```{r}
+# Summary statistics
+summary(data)
+
+
+# Boxplots to detect outliers for 'V' and 'H'
+ggplot(data, aes(x = "", y = V)) + geom_boxplot() + labs(title = "Boxplot of V")
+ggplot(data, aes(x = "", y = H)) + geom_boxplot() + labs(title = "Boxplot of H")
+
+# Bar plot for 'M_category'
+ggplot(data, aes(x = M_category)) + geom_bar(fill = "purple") + labs(title = "Distribution of M_category")
+
+# Distribution plots for numeric columns 'V' and 'H'
+ggplot(data, aes(x = V)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  labs(title = "Distribution of V") +
+  theme_minimal()
+
+ggplot(data, aes(x = H)) +
+  geom_histogram(bins = 30, fill = "green", color = "black") +
+  labs(title = "Distribution of H") +
+  theme_minimal()
+
+# Boxplots to detect outliers for 'V' and 'H'
+ggplot(data, aes(x = "", y = V)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Boxplot of V") +
+  theme_minimal()
+
+ggplot(data, aes(x = "", y = H)) +
+  geom_boxplot(fill = "lightgreen") +
+  labs(title = "Boxplot of H") +
+  theme_minimal()
+
+# Bar plot for 'M_category' to show class distribution
+ggplot(data, aes(x = M_category)) +
+  geom_bar(fill = "purple") +
+  labs(title = "Distribution of M_category") +
+  theme_minimal()
+
+# Scatter plot for V vs H colored by M_category
+ggplot(data, aes(x = V, y = H, color = M_category)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Scatter Plot of V vs H by M_category") +
+  theme_minimal()
+
+# Pair plot for V and H, colored by M_category
+ggpairs(data, columns = c("V", "H"), aes(color = M_category)) +
+  labs(title = "Pair Plot of Numeric Variables")
+
+# Outlier detection using Z-scores for V and H
+data <- data %>%
+  mutate(
+    V_z = (V - mean(V, na.rm = TRUE)) / sd(V, na.rm = TRUE),
+    H_z = (H - mean(H, na.rm = TRUE)) / sd(H, na.rm = TRUE)
+  )
+
+# Display potential outliers (absolute Z-score > 3)
+outliers <- data %>% filter(abs(V_z) > 3 | abs(H_z) > 3)
+print("Potential outliers based on Z-scores:")
+print(outliers)
+
+# Correlation matrix and heatmap for numeric variables
+numeric_data <- data %>% select(V, H)
+cor_matrix <- cor(numeric_data)
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black", tl.srt = 45)
+
+# Density plots for V and H, colored by M_category
+ggplot(data, aes(x = V, fill = M_category)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Density Plot of V by M_category") +
+  theme_minimal()
+
+ggplot(data, aes(x = H, fill = M_category)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Density Plot of H by M_category") +
+  theme_minimal()
+
+# Boxplots of V and H grouped by M_category
+ggplot(data, aes(x = M_category, y = V, fill = M_category)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of V by M_category") +
+  theme_minimal()
+
+ggplot(data, aes(x = M_category, y = H, fill = M_category)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of H by M_category") +
+  theme_minimal()
+
+# Summary statistics grouped by M_category for V and H
+grouped_summary <- data %>%
+  group_by(M_category) %>%
+  summarise(
+    V_mean = mean(V, na.rm = TRUE),
+    V_sd = sd(V, na.rm = TRUE),
+    H_mean = mean(H, na.rm = TRUE),
+    H_sd = sd(H, na.rm = TRUE)
+  )
+print("Summary statistics for V and H by M_category:")
+print(grouped_summary)
+```
+
+# Step 4: Data Modeling
+```{r}
+# Split data into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(data$M_category, p = 0.7, list = FALSE)
+train_data <- data[trainIndex, ]
+test_data <- data[-trainIndex, ]
+# Replace spaces with underscores in column names
+names(train_data) <- gsub(" ", "_", names(train_data))
+names(test_data) <- gsub(" ", "_", names(test_data))
+
+# Re-usable formula
+train_formula <- M_category ~ V + H + S_dry_and_limy + S_dry_and_sandy + S_humid_and_humus + S_humid_and_limy + S_humid_and_sandy
+
+print(head(train_data))
+print(head(test_data))
+
+# Define training control for cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+# Train models
+
+# Logistic Regression
+log_model <- train(train_formula, data = train_data, method = "multinom", trControl = train_control)
+
+# Decision Tree
+tree_model <- train(train_formula, data = train_data, method = "rpart", trControl = train_control)
+
+# Random Forest
+rf_model <- train(train_formula, data = train_data, method = "rf", trControl = train_control)
+
+# K-Nearest Neighbors (KNN)
+knn_model <- train(train_formula, data = train_data, method = "knn", trControl = train_control)
+
+# Naive Bayes
+nb_model <- train(train_formula, data = train_data, method = "naive_bayes", trControl = train_control)
+
+# Support Vector Machine (SVM)
+svm_model <- train(train_formula, data = train_data, method = "svmLinear", trControl = train_control)
+
+```
+
+# Step 5: Model Evaluation
+```{r}
+# Predictions for each model
+log_pred <- predict(log_model, test_data)
+tree_pred <- predict(tree_model, test_data)
+rf_pred <- predict(rf_model, test_data)
+knn_pred <- predict(knn_model, test_data)
+nb_pred <- predict(nb_model, test_data)
+svm_pred <- predict(svm_model, test_data)
+
+# Calculate accuracy for each model
+log_accuracy <- mean(log_pred == test_data$M_category)
+tree_accuracy <- mean(tree_pred == test_data$M_category)
+rf_accuracy <- mean(rf_pred == test_data$M_category)
+knn_accuracy <- mean(knn_pred == test_data$M_category)
+nb_accuracy <- mean(nb_pred == test_data$M_category)
+svm_accuracy <- mean(svm_pred == test_data$M_category)
+
+# Print model accuracies
+cat("Logistic Regression Accuracy:", log_accuracy, "\n")
+cat("Decision Tree Accuracy:", tree_accuracy, "\n")
+cat("Random Forest Accuracy:", rf_accuracy, "\n")
+cat("KNN Accuracy:", knn_accuracy, "\n")
+cat("Naive Bayes Accuracy:", nb_accuracy, "\n")
+cat("SVM Accuracy:", svm_accuracy, "\n")
+
+# Confusion matrices for detailed evaluation
+confusionMatrix(log_pred, test_data$M_category)
+confusionMatrix(tree_pred, test_data$M_category)
+confusionMatrix(rf_pred, test_data$M_category)
+confusionMatrix(knn_pred, test_data$M_category)
+confusionMatrix(nb_pred, test_data$M_category)
+confusionMatrix(svm_pred, test_data$M_category)
+
+```
+
+# Step 6: Hyperparameter Tuning
+```{r}
+# Hyperparameter grid for Logistic Regression (multinom)
+log_grid <- expand.grid(.decay = c(0.1, 0.01, 0.001))
+
+# Hyperparameter grid for Decision Tree (rpart)
+tree_grid <- expand.grid(.cp = seq(0.01, 0.1, by = 0.01))
+
+# Hyperparameter grid for Random Forest (rf)
+rf_grid <- expand.grid(.mtry = c(2, 3, 4, 5, 6))
+
+# Hyperparameter grid for K-Nearest Neighbors (knn)
+knn_grid <- expand.grid(.k = c(3, 5, 7, 9))  # Number of neighbors
+
+# Support Vector Machine (svmLinear)
+svm_grid <- expand.grid(.C = 30, .sigma = 0.7)  # Cost parameter
+
+# Hyperparameter grid for Naive Bayes
+nb_grid <- NULL  # Naive Bayes typically doesn't require hyperparameter tuning
+
+# Logistic Regression
+log_model <- train(train_formula, data = train_data, method = "multinom",
+                   trControl = train_control, tuneGrid = log_grid)
+
+# Decision Tree
+tree_model <- train(train_formula, data = train_data, method = "rpart",
+                    trControl = train_control, tuneGrid = tree_grid)
+
+# Random Forest
+rf_model <- train(train_formula, data = train_data, method = "rf",
+                  trControl = train_control, tuneGrid = rf_grid)
+
+# K-Nearest Neighbors (KNN)
+knn_model <- train(train_formula, data = train_data, method = "knn",
+                   trControl = train_control, tuneGrid = knn_grid)
+
+# Support Vector Machine (SVM)
+svm_model <- train(train_formula, data = train_data, method = "svmRadial",
+                   trControl = train_control, tuneGrid = svm_grid)
+
+# Naive Bayes
+nb_model <- train(train_formula, data = train_data, method = "naive_bayes",
+                  trControl = train_control, tuneGrid = nb_grid)
+```
+# Step 7: Model Comparison
+```{r}
+# Compare models
+model_comparison <- resamples(list(Logistic_Regression = log_model,
+                                  Decision_Tree = tree_model,
+                                  Random_Forest = rf_model,
+                                  KNN = knn_model,
+                                  SVM = svm_model,
+                                  Naive_Bayes = nb_model))
+
+# Print model comparison results
+summary(model_comparison)
+
+# To plot the comparison results
+bwplot(model_comparison)
+
+```
+# STep 8: Evaluating Best Model
+```{r}
+# Choose the best model based on accuracy (SVM in this case)
+best_model <- svm_model  # SVM as the best model
+
+# Evaluate on test data
+test_pred <- predict(best_model, test_data)
+test_accuracy <- mean(test_pred == test_data$M_category)
+cat("Test Accuracy of Best Model (SVM):", test_accuracy, "\n")
+
+# Confusion matrix
+confusionMatrix(test_pred, test_data$M_category)
+```
